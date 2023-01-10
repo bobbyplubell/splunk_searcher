@@ -35,3 +35,6 @@ export SEARCHER_DEFAULT_N_JOBS="1"
 
 # set to disable confirmation prompt
 #export SEARCHER_NO_CONFIRM
+
+# set to do merging as resuls are available insead of on completion of searches
+#export SEARCHER_INLINE_MERGE

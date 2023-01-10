@@ -222,7 +222,16 @@ class ExportOptions(TypedDict):
     export_mode: Optional[str]
     merge_path: Optional[str]
     encoding: str
+    # if merge_path set, should it happen as exports happen, or as single pass at end?
+    inline_merge: bool
+    # used for resuming post-merge exports
+    export_state: Optional[ExportState]
 
+class ExportState(TypedDict):
+    """
+    object for storing incomplete export
+    """
+    unmerged_sids: list[str]
 
 def print_search_options(options: SearchOptions) -> None:
     """
@@ -291,6 +300,20 @@ def validate_export_options(options: ExportOptions) -> bool:
                 valid = False
             else:
                 loggy.warning("File already exists at merge path, it will be appended.")
+    
+    # make sure merge path is defined if inline_merge is set
+    if options["inline_merge"]:
+        loggy.warning("Using inline merge may lead to out of order merged results.")
+        if not options["merge_path"]:
+            loggy.error("inline_merge is set but no merge_path passed")
+            valid = False
+    
+    if not options["inline_merge"] and options["merge_path"]:
+        # using post merge
+        if not options["export_path"]:
+            loggy.error("merge_path set, inline_merge not set but no export_path defined")
+            loggy.info("Data must be stored in export_path for post merge")
+            valid = False
 
     if options["export_mode"] == "dump":
         if not exists(get_splunk_dispatch_path()):
@@ -383,6 +406,7 @@ def validate_search_options(options: SearchOptions) -> None:
             )
             valid = False
     else:
+        # Print a warning if |dump is being used without export_mode=dump
         if "|dump" in options["search"] or "| dump" in options["search"]:
             loggy.warning(
                 "Using |dump Splunk command but export mode is %s",
@@ -390,12 +414,16 @@ def validate_search_options(options: SearchOptions) -> None:
             )
             loggy.info(("If you want to set the export format of the dump results,"
              "use format option like:"
-             "'| dump basefilename=<filename> format=[raw | csv | tsv | json | xml]'"))
+             "'| dump basefilename=<filename> format=[raw | csv | tsv | json | xml]'"
+             " and leave searcher's export mode as dump"))
 
     # validate job limits if defined
     if options["job_limits"] and len(options["job_limits"]["limits"]) > 0:
         if not validate_job_limits(options["job_limits"]["limits"]):
             valid = False
+
+    if options["export_options"]["inline_merge"] and options["export_threads"]:
+        loggy.warning("Using inline merge with export threads not recommended, unset inline-merge for best results.")
 
     if not valid:
         quit()
@@ -418,6 +446,7 @@ def create_search_job(splunk_client: client.Service, search_str: str) -> client.
 
 
 def setup_export(options: ExportOptions) -> None:
+    """ Make folders if they don't exist """
     if options["export_path"] and not exists(options["export_path"]):
         loggy.info(
             "Could not find export path %s, creating dir(s)",
@@ -461,8 +490,8 @@ def export_job(job: client.Job, options: ExportOptions) -> Optional[int]:
             job.set_ttl(1)
             return 0
 
-        # open gzip files and append to the merge path
-        if options["merge_path"]:  # read and merge dump files into merge path
+        # open gzip files and append to the merge path if using inline_merge
+        if options["merge_path"] and options["inline_merge"]: 
             loggy.debug(
                 "Merging %s dump files to %s",
                 len(dump_files),
@@ -491,7 +520,7 @@ def export_job(job: client.Job, options: ExportOptions) -> Optional[int]:
                 rename(join(dump_folder, dump_file), join(dest_folder, dump_file))
 
     else:  # use api export mode
-        if options["export_path"] or options["merge_path"]:
+        if options["export_path"] or (options["merge_path"] and options["inline_merge"]):
             # get results using export_mode and decode to string
             results = job.results(output_mode=options["export_mode"]).read().decode()
             result_count = len(results)
@@ -501,13 +530,71 @@ def export_job(job: client.Job, options: ExportOptions) -> Optional[int]:
             with open(join(options["export_path"], f"{job.name}"), "w", encoding=options["encoding"]) as single_result:
                 single_result.write(results)
 
-        if options["merge_path"]:  # write results to merge file
+        if options["merge_path"] and options["inline_merge"]:  # write results to merge file if using inline
             with open(options["merge_path"], "a", encoding=options["encoding"]) as all_results:
                 all_results.write(results)
     # reduce ttl after finished exporting to avoid clogging splunk's dispatch folder
     job.set_ttl(1)
+    # return byte count
     return result_count
 
+def post_merge(sids: list[str], options: ExportOptions) -> int:
+    """ Merge a list of SID exports after they are all completed
+        Preserves order
+    """
+    global QUIT
+    global QUIT_C
+
+    # make sure we're not trying to merge already merged data
+    if options["inline_merge"]:
+        loggy.error("Tried to run post_merge but inline_merge is set")
+        return -1
+
+    if not options["merge_path"]:
+        loggy.error("Tried to run post-merge but merge_path is not set")
+        return -1
+
+    if not options["export_path"]:
+        loggy.error("Tried to run post-merge but export_path is not set")
+        return -1
+
+    loggy.info("Starting post-merge")
+    # put sids in order
+    sids = sorted(sids, key=float)
+
+    # print at 10% completion intervals
+    print_freq = int(len(sids) * 0.1)
+
+    result_count = 0
+    with open(options["merge_path"], "a", encoding=options["encoding"]) as outfile:
+        # loop and append to merge file
+        for idx,sid in enumerate(sids):
+            # check for interrupts
+            if QUIT and QUIT_C == 1:
+                loggy.info("Post-merge safely interruped, saving state")
+                QUIT = False
+                options["export_state"] = ExportState(unmerged_sids=sids)
+                return result_count
+            elif QUIT_C > 1:
+                loggy.warning("Post-merge forcefully interrupted, results not valid")
+                quit()
+
+            if idx % print_freq == 0:
+                loggy.info("Post-merge %s of %s jobs merged.", idx, len(sids))
+
+            if options["export_mode"] == "dump":
+                # dump mode places a folder for each sid instead of a file
+                dump_folder = join(options["export_path"], sid)
+                dump_files = sorted(listdir(dump_folder))
+                for dump_file in dump_files:
+                    loggy.debug("Merging %s", join(dump_folder, dump_file))
+                    with gzip.open(join(dump_folder, dump_file), "r") as single_result:
+                        result_count += outfile.write(single_result.read().decode())
+            else:
+                with open(join(options["export_path"], sid), "r", encoding=options["encoding"]) as infile:
+                    result_count+=outfile.write(infile.read())
+    return result_count
+        
 
 # ------------------ Chunked search --------------------------
 def chunk_range(
@@ -652,13 +739,15 @@ def multi_job_search(
     running_jobs: list[client.Job] = []
     # list of paused jobs
     paused_jobs: list[client.Job] = []
-    # current idx in searches list
-    # load it from search_options in case search is being resumed
-    searches_idx: int = search_options["chunk_options"]["start_at"]
     # start time for elapsed time stat
     search_start_time: datetime = datetime.now()
     # total num lines exported
     total_results: int = 0
+    # list of completed sid strings
+    completed_sids: list[str] = []
+    # load previously completed sids from state if presen
+    if search_options["export_options"]["export_state"]:
+        completed_sids = search_options["export_options"]["export_state"]["unmerged_sids"]
     # if multithreaded export enabled
     if search_options["export_threads"]:
         # thread pool for export jobs
@@ -680,7 +769,8 @@ def multi_job_search(
         return False
 
     def searches_remain() -> bool:
-        return searches_idx < len(searches)
+        assert(search_options["chunk_options"])
+        return search_options["chunk_options"]["start_at"] < len(searches)
 
     # loop until either no jobs or searches remain, or if quitting loop until no jobs remain
     # stop loop if more than 1 ctrl+c is counted
@@ -693,6 +783,9 @@ def multi_job_search(
         if len(finished_jobs) > 0:
             cycle_result_count = 0
             for job in finished_jobs:
+                if not search_options["export_options"]["inline_merge"] and search_options["export_options"]["merge_path"]:
+                    # need to track SIDs completed if not using merge inline
+                    completed_sids.append(job.name)
                 if search_options["export_threads"]:
                     export_jobs.append(
                         export_threads.submit(
@@ -754,7 +847,7 @@ def multi_job_search(
 
         # calculate how many jobs to start
         # lowest of either amount needed to reach target or amount needed to finish searches list
-        to_add = min(target_amt_jobs - len(running_jobs), len(searches) - searches_idx)
+        to_add = min(target_amt_jobs - len(running_jobs), len(searches) - search_options["chunk_options"]["start_at"])
         if quitting:
             # this prevents any new jobs from being added while maintaining the job limits during safe quit
             to_add = min(to_add, len(paused_jobs))
@@ -773,9 +866,9 @@ def multi_job_search(
                     # add new job to list, incrementing idx
                     loggy.debug("Adding new job")
                     running_jobs.append(
-                        create_search_job(splunk_client, searches[searches_idx])
+                        create_search_job(splunk_client, searches[search_options["chunk_options"]["start_at"]])
                     )
-                    searches_idx += 1
+                    search_options["chunk_options"]["start_at"] += 1
         elif to_add < 0:  # pause jobs since there are too many
             loggy.debug("Pausing %s jobs.",-to_add)
             for _ in range(-to_add):
@@ -791,7 +884,7 @@ def multi_job_search(
                 len(running_jobs),
                 target_amt_jobs,
                 len(paused_jobs),
-                searches_idx,
+                search_options["chunk_options"]["start_at"],
                 len(searches),
                 len(export_jobs),
                 total_results,
@@ -803,7 +896,7 @@ def multi_job_search(
                 len(running_jobs),
                 target_amt_jobs,
                 len(paused_jobs),
-                searches_idx,
+                search_options["chunk_options"]["start_at"],
                 len(searches),
                 total_results,
                 elapsed,
@@ -825,10 +918,26 @@ def multi_job_search(
         quit()
     elif quitting and QUIT_C == 1:  # safe quit, save progress
         # save progress if process was not quit a second time
-        search_options["chunk_options"]["start_at"] = searches_idx
+        if search_options["export_options"]["inline_merge"] and search_options["export_options"]["merge_path"]:
+            # using post-merge, save sids state
+            search_options["export_options"]["export_state"] = ExportState(unmerged_sids=completed_sids)
         save_options(search_options)
     elif not quitting and QUIT_C <= 0:
         loggy.info("All jobs completed!")
+
+    # if not using inline merge and merge_path is set, run the post_merge on completed SIDs
+    if not quitting and not search_options["export_options"]["inline_merge"] and search_options["export_options"]["merge_path"]:
+        loggy.info("Starting merge pass on %s completed jobs", len(completed_sids))
+        result_count = post_merge(completed_sids, search_options["export_options"])
+        if not QUIT and QUIT_C == 0:
+            loggy.info("Finished post-merge, %s bytes exported to %s",
+                result_count,
+                search_options["export_options"]["merge_path"])
+        elif QUIT_C == 1:
+            loggy.info("Post-merge safely interrupted, saving state")
+            save_options(search_options)
+        else:
+            loggy.info("Post-merge unsuccessful")
 
     # re-allow interrupt quit when finished
     NO_INTERRUPT = False
@@ -1104,6 +1213,15 @@ def resume(splunk_client: client.Service, progress_path: str, no_confirm: bool) 
     help="Enable multi-threaded export and set number of threads",
     envvar="SEARCHER_EXPORT_THREADS",
 )
+@click.option(
+    "--inline-merge",
+    help=("Do merging as results become available,"
+        "if unset, results will be merged when all searches are complete."
+        " This option may cause out-of-order merge results."),
+    is_flag=True,
+    default=False,
+    envvar="SEARCHER_INLINE_MERGE"
+)
 def cli_chunk_search(
     splunk_client: client.Service,
     search: str,
@@ -1118,6 +1236,7 @@ def cli_chunk_search(
     no_confirm: bool,
     limit: list[tuple[str, str, int]],
     export_threads: int,
+    inline_merge: bool
 ) -> None:
     """
     Runs a time-chunked search with multiple jobs
@@ -1133,7 +1252,12 @@ def cli_chunk_search(
     job_limits = JobLimits(default_n_jobs=default_n_jobs, limits=limits)
     coptions = ChunkOptions(chunk_size=chunk_size_td, start_at=0)
     eoptions = ExportOptions(
-        export_path=abspath(export_path), export_mode=export_mode, merge_path=merge_path, encoding="utf-8"
+        export_path=abspath(export_path),
+        export_mode=export_mode,
+        merge_path=merge_path,
+        encoding="utf-8",
+        inline_merge=inline_merge,
+        export_state=None
     )
     search_options = SearchOptions(
         search=search,
@@ -1147,7 +1271,7 @@ def cli_chunk_search(
         export_threads=export_threads,
     )
 
-    # valiate and print options
+    # validate and print options
     validate_search_options(search_options)
     print_search_options(search_options)
     searches = chunk_search(search_options)
@@ -1220,7 +1344,7 @@ def cli_search(
 
     # build options state
     eoptions = ExportOptions(
-        export_path=export_path, export_mode=export_mode, merge_path=merge_path, encoding='utf-8'
+        export_path=export_path, export_mode=export_mode, merge_path=merge_path, encoding='utf-8', inline_merge=True, export_state=None
     )
     options = SearchOptions(
         export_options=eoptions,
