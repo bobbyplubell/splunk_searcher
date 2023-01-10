@@ -497,7 +497,7 @@ def export_job(job: client.Job, options: ExportOptions) -> Optional[int]:
             result_count = len(results)
 
         # write results to a file with sid as name in export path
-        if options["export_path"]:  
+        if options["export_path"]:
             with open(join(options["export_path"], f"{job.name}"), "w", encoding=options["encoding"]) as single_result:
                 single_result.write(results)
 
