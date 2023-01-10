@@ -60,6 +60,36 @@ Options:
 ```
 
 chunk-search: search with multiple jobs and multiple export threads
+  - Splits search into multiple searches with chunked date ranges
+    - Must include `earliest={earliest} latest={latest}` in search query for interpolation of date ranges
+    - Uses `--chunk-size`, `START-DATE` and `END-DATE` to create ranges
+  - Uses a list of concurrently running jobs, creating new ones as job limits allow.
+    - requires default number of jobs `--default-n-jobs <int>`
+    - can set additional limits with `--limit <HH:MM:SS> <HH:MM:SS> <n_jobs>`
+      - multiple limits can be set by passing the limit option again (for example `--limit 01:00:00 02:00:00 1 --limit 02:00:00 03:00:00 4`)
+  - Can be paused at any time with a single ctrl+c
+    - Running jobs will be allowed to complette
+    - Options and state will be saved and can be reloaded with the `resume` command to finish the search later.
+    - Pressing ctrl+c twice causes a safe (for the search head) exit by finalizing running jobs.
+    - Pressing ctrl+c three times force quits and may leave jobs running on the search head.
+  - Can optionally use a pool of threads in to run exports of completed jobs in the background while searches are polled on the main thread (`--export-threads <int>`).
+  - Can use various export modes with `--export-mode <mode>` (defaults to raw):
+    - modes provided by Splunk API: "atom", "csv", "json", "json_cols", "json_rows", "raw", "xml"
+      - Exports over the network via the API
+    - "dump" mode which requires the script to run local on the search head and requires use of `|dump ` Splunk command in query.
+      - Finds the results in Splunk's dispatch folder and moves them to the export path without using the API
+  - Two ways to export results: `--export-path` and `--merge-path`
+      - `--export-path <directory>` takes a path to a directory where individual search chunks will be stored (files named by SID or folders named by SID containing dump files if `--export-mode dump`)
+        - Note: using `--export-mode dump` with export-path insttead creates folders under the export path containing the dump files for each search chunk.
+        - Required unless using `--inline-merge`
+        - Will be created if it doesn't exist (produces warning prior to confirmation)
+      - `--merge-path <file>` takes a path to a file (can merge existing file, produces warning) and merges the results of all search chunks into the file after all searches complete.
+        - Can additionally use `--inline-merge` flag which will merge results into the `merge-path` as each search completes. This option is incompatible with multi-threaded exporting and may produce out of order results, but allows omission of the `--export-path` option
+        - Optional, if not set, no merging will occur
+        - Directory for the file will be created if it doesn't exist (produces warning prior to confirmation)
+  - Confirms options and any warnings prior to starting search jobs (can bypass this with `--no-confirm` if needed)
+  - All options except the search query, start-date, and end-date can be configured in environment variables
+
 ```
 Usage: splunk_searcher.py chunk-search [OPTIONS] SEARCH START-DATE END-DATE
 
