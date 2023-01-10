@@ -142,14 +142,12 @@ def handle_sigint(signal: int, frame: Optional[FrameType]) -> None:
     QUIT_C += 1
 
     if QUIT_C >= 3:
-        loggy.error(
-            "Ctrl+c pressed 3 times, force quitting. This may leave jobs hanging or results un-exported and will not allow for resume."
-        )
+        loggy.error(("Ctrl+c pressed 3 times, force quitting. This may leave jobs hanging"
+            " or results un-exported and will not allow for resume."))
         quit()
     elif QUIT_C >= 2:
-        loggy.warning(
-            "Press ctrl+c again to force quit (WARNING: this may leave jobs running on the searchhead and cannot be resumed)"
-        )
+        loggy.warning(( "Press ctrl+c again to force quit (WARNING: "
+        "this may leave jobs running on the searchhead and cannot be resumed)"))
 
 
 # ------------------ State --------------------------
@@ -174,7 +172,7 @@ def save_options(search_options: SearchOptions) -> None:
     """
     Save a SearchOptions object to file
     """
-    loggy.info("Saving progress to {}".format(search_options["progress_path"]))
+    loggy.info("Saving progress to %s",search_options["progress_path"])
     with open(search_options["progress_path"], "wb") as outfile:
         pickle.dump(search_options, outfile)
     loggy.info("Saved progress. Use resume command to start search where you left off.")
@@ -184,7 +182,7 @@ def load_options(path: str) -> SearchOptions:
     """
     Load a SearchOptions object from file
     """
-    loggy.info("Loading progress from {}".format(path))
+    loggy.info("Loading progress from %s",path)
     with open(path, "rb") as infile:
         return cast(SearchOptions, pickle.load(infile))
 
@@ -223,6 +221,7 @@ class ExportOptions(TypedDict):
     export_path: Optional[str]
     export_mode: Optional[str]
     merge_path: Optional[str]
+    encoding: str
 
 
 def print_search_options(options: SearchOptions) -> None:
@@ -299,9 +298,8 @@ def validate_export_options(options: ExportOptions) -> bool:
                 "Using 'dump' export-mode but Splunk dispatch folder could not be found at %s",
                 get_splunk_dispatch_path()
             )
-            loggy.error(
-                "Script must run locally on search head and have permission to read dispatch directory when using 'dump' export-mode"
-            )
+            loggy.error(("Script must run locally on search head and have "
+                "permission to read dispatch directory when using 'dump' export-mode"))
             valid = False
 
     if options["export_path"]:
@@ -333,12 +331,12 @@ def validate_job_limits(job_limits: list[JobLimit]) -> bool:
         key=lambda x: str_to_time(x["start"]),
     )
     # make sure ranges don't overlap
-    for limit_idx in range(len(job_limits)):
+    for limit_idx, _ in enumerate(job_limits):
         # parse as time of day
         try:
             start_time = str_to_time(job_limits[limit_idx]["start"])
             stop_time = str_to_time(job_limits[limit_idx]["stop"])
-        except:
+        except ValueError:
             loggy.error(
                 "Error: could not parse job limits start or stop time, %s",
                 job_limits[limit_idx]
@@ -348,7 +346,8 @@ def validate_job_limits(job_limits: list[JobLimit]) -> bool:
         # make sure stop time is after start time
         if stop_time <= start_time:
             loggy.error(
-                f"Error: job limit stop time is before or equal to start time, {job_limits[limit_idx]}"
+                "Error: job limit stop time is before or equal to start time, %s",
+                job_limits[limit_idx]
             )
             return False
 
@@ -358,7 +357,9 @@ def validate_job_limits(job_limits: list[JobLimit]) -> bool:
             next_start = str_to_time(job_limits[limit_idx + 1]["start"])
             if stop_time > next_start:
                 loggy.error(
-                    f"Error: job limit stop time overlaps with other limit start time, {job_limits[limit_idx]} and {job_limits[limit_idx+1]}"
+                    "Error: job limit stop time overlaps with other limit start time, %s and %s",
+                    job_limits[limit_idx],
+                    job_limits[limit_idx+1]
                 )
                 return False
     return True
@@ -384,13 +385,12 @@ def validate_search_options(options: SearchOptions) -> None:
     else:
         if "|dump" in options["search"] or "| dump" in options["search"]:
             loggy.warning(
-                "Using |dump Splunk command but export mode is {}".format(
-                    options["export_options"]["export_mode"]
-                )
+                "Using |dump Splunk command but export mode is %s",
+                options["export_options"]["export_mode"]
             )
-            loggy.info(
-                "If you want to set the export format of the dump results, use format option like '| dump basefilename=<filename> format=[raw | csv | tsv | json | xml]'"
-            )
+            loggy.info(("If you want to set the export format of the dump results,"
+             "use format option like:"
+             "'| dump basefilename=<filename> format=[raw | csv | tsv | json | xml]'"))
 
     # validate job limits if defined
     if options["job_limits"] and len(options["job_limits"]["limits"]) > 0:
@@ -464,13 +464,13 @@ def export_job(job: client.Job, options: ExportOptions) -> Optional[int]:
         # open gzip files and append to the merge path
         if options["merge_path"]:  # read and merge dump files into merge path
             loggy.debug(
-                "Merging {} dump files to {}".format(
-                    len(dump_files), join(options["merge_path"])
-                )
+                "Merging %s dump files to %s",
+                len(dump_files),
+                join(options["merge_path"])
             )
-            with open(options["merge_path"], "a") as all_results:
+            with open(options["merge_path"], "a", encoding=options["encoding"]) as all_results:
                 for dump_file in dump_files:
-                    loggy.debug(f"Merging {join(dump_folder, dump_file)}")
+                    loggy.debug("Merging %s", join(dump_folder, dump_file))
                     with gzip.open(join(dump_folder, dump_file), "r") as single_result:
                         results = single_result.read().decode()
                         result_count = len(results)
@@ -480,12 +480,14 @@ def export_job(job: client.Job, options: ExportOptions) -> Optional[int]:
         if options["export_path"]:
             dest_folder = join(options["export_path"], job.name)
             mkdir(dest_folder)
-            loggy.debug(
-                f"Moving {len(dump_files)} dump files from {dump_folder} to {dest_folder}"
+            loggy.debug("Moving %s dump files from %s to %s",
+                len(dump_files),
+                dump_folder,
+                dest_folder
             )
             # move dispatch/<sid>/dump/* to dest/<sid>/
             for dump_file in dump_files:
-                loggy.debug(f"Moving {join(dump_folder, dump_file)}")
+                loggy.debug("Moving %s", join(dump_folder, dump_file))
                 rename(join(dump_folder, dump_file), join(dest_folder, dump_file))
 
     else:  # use api export mode
@@ -494,16 +496,13 @@ def export_job(job: client.Job, options: ExportOptions) -> Optional[int]:
             results = job.results(output_mode=options["export_mode"]).read().decode()
             result_count = len(results)
 
-        if options[
-            "export_path"
-        ]:  # write results to a file with sid as name in export path
-            with open(
-                join(options["export_path"], f"{job.name}"), "w"
-            ) as single_result:
+        # write results to a file with sid as name in export path
+        if options["export_path"]:  
+            with open(join(options["export_path"], f"{job.name}"), "w", encoding=options["encoding"]) as single_result:
                 single_result.write(results)
 
         if options["merge_path"]:  # write results to merge file
-            with open(options["merge_path"], "a") as all_results:
+            with open(options["merge_path"], "a", encoding=options["encoding"]) as all_results:
                 all_results.write(results)
     # reduce ttl after finished exporting to avoid clogging splunk's dispatch folder
     job.set_ttl(1)
@@ -555,12 +554,11 @@ def chunk_search(options: SearchOptions) -> list[str]:
     range_end_str = date_to_splunk(options["end_date"])
 
     loggy.info(
-        "Chunking search {} from {} to {} with chunk_size of {}".format(
-            options["search"],
-            range_start_str,
-            range_end_str,
-            options["chunk_options"]["chunk_size"],
-        )
+        "Chunking search %s from %s to %s with chunk_size of %s",
+        options["search"],
+        range_start_str,
+        range_end_str,
+        options["chunk_options"]["chunk_size"],
     )
     # get datetime chunks
     date_chunks = chunk_range(
@@ -578,7 +576,7 @@ def chunk_search(options: SearchOptions) -> list[str]:
             earliest=start_date_str, latest=end_date_str
         )
         searches.append(new_search)
-    loggy.info(f"Generated {len(searches)} chunked searches.")
+    loggy.info("Generated %s chunked searches.", len(searches))
     return searches
 
 
@@ -622,6 +620,7 @@ def remove_done(running_jobs: list[client.Job]) -> list[client.Job]:
 def remove_done_exports(
     export_jobs: list[Future[Optional[int]]],
 ) -> list[Optional[int]]:
+    """ Removes finished export job futures from the list and returns them """
     finished = []
     for export_job_idx in reversed(range(len(export_jobs))):
         export_job_: Future[Optional[int]] = export_jobs[export_job_idx]
@@ -633,6 +632,7 @@ def remove_done_exports(
 def multi_job_search(
     splunk_client: client.Service, search_options: SearchOptions, searches: list[str]
 ) -> None:
+    """ Run a search with multiple jobs at once """
     # add sigint flag to scope
     global QUIT
     global NO_INTERRUPT
@@ -646,7 +646,7 @@ def multi_job_search(
     assert search_options["chunk_options"]
     assert search_options["job_limits"]
 
-    loggy.info(f"Running multi-job search for {len(searches)} searches.")
+    loggy.info("Running multi-job search for %s searches.", len(searches))
 
     # list of currently running jobs on searchhead
     running_jobs: list[client.Job] = []
@@ -760,7 +760,7 @@ def multi_job_search(
             to_add = min(to_add, len(paused_jobs))
         # if positive amount of jobs to add
         if to_add > 0:
-            loggy.debug(f"Starting or unpausing {to_add} new jobs")
+            loggy.debug("Starting or unpausing %s new jobs", to_add)
             for _ in range(to_add):
                 # prioritize unpausing jobs before adding new ones
                 if len(paused_jobs) > 0:
@@ -998,14 +998,14 @@ def resume(splunk_client: client.Service, progress_path: str, no_confirm: bool) 
     Resumes an existing search with a progress file
     """
     if progress_path == "":
-        loggy.warning(f"No progress path passed, searching {getcwd()}")
+        loggy.warning("No progress path passed, searching %s",getcwd())
         files = listdir(getcwd())
         files = sorted(
             [x for x in files if x.startswith("searcher_progress_")], reverse=True
         )
         if len(files) > 0:
             progress_path = abspath(files[0])
-            loggy.info(f"Found progress file {progress_path}.")
+            loggy.info("Found progress file %s.", progress_path)
         else:
             loggy.error(
                 "Could not find progress file, please pass it using the --progress-path option"
@@ -1093,7 +1093,8 @@ def resume(splunk_client: client.Service, progress_path: str, no_confirm: bool) 
     type=click.Tuple(types=[str, str, int]),
     required=False,
     multiple=True,
-    help="Limit on amount of jobs by time of day. Format (HH:MM:SS or HH:MM:SS.FFFFFF): --limit START STOP N_JOBS [--limit START STOP N_JOBS [...]]",
+    help=("Limit on amount of jobs by time of day. Format (HH:MM:SS or "
+    "HH:MM:SS.FFFFFF): --limit START STOP N_JOBS [--limit START STOP N_JOBS [...]]"),
     envvar="SEARCHER_LIMITS",
 )
 @click.option(
@@ -1132,7 +1133,7 @@ def cli_chunk_search(
     job_limits = JobLimits(default_n_jobs=default_n_jobs, limits=limits)
     coptions = ChunkOptions(chunk_size=chunk_size_td, start_at=0)
     eoptions = ExportOptions(
-        export_path=abspath(export_path), export_mode=export_mode, merge_path=merge_path
+        export_path=abspath(export_path), export_mode=export_mode, merge_path=merge_path, encoding="utf-8"
     )
     search_options = SearchOptions(
         search=search,
@@ -1150,7 +1151,7 @@ def cli_chunk_search(
     validate_search_options(search_options)
     print_search_options(search_options)
     searches = chunk_search(search_options)
-    loggy.info(f"First search: {searches[0]}")
+    loggy.info("First search: %s", searches[0])
     if not no_confirm:
         if not confirm():
             quit()
@@ -1219,7 +1220,7 @@ def cli_search(
 
     # build options state
     eoptions = ExportOptions(
-        export_path=export_path, export_mode=export_mode, merge_path=merge_path
+        export_path=export_path, export_mode=export_mode, merge_path=merge_path, encoding='utf-8'
     )
     options = SearchOptions(
         export_options=eoptions,
