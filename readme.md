@@ -1,6 +1,20 @@
 # Splunk Searcher
 This script is intended to run large searches that may not work on the WebUI
 
+# Virtualenv setup
+It's highly recommended to use a virtualenv to run the script. To set one up do the following:
+```
+# unix
+python3 -m pip install virtualenv
+python3 -m venv venv
+venv/bin/python3 -m pip install -r requirements.txt
+
+# windows
+python3 -m pip install virtualenv
+python3 -m venv venv
+venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
 # Usage
 The script has quite a few parameters and all are broken out on the command line. Some can be set via environment variables as in `searcher_config.ps1` and `searcher_config.sh`.
 
@@ -73,6 +87,7 @@ Options:
   ```
 
 # Environment variables
+To use the environment variable files, they must be sourced (`source searcher_config.sh` on unix or `. .\searcher_config.sh` on windows)
 ```
 # splunk api host or IP
 export SEARCHER_HOST="localhost"
